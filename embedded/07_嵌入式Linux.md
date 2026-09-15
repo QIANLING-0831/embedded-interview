@@ -1,0 +1,864 @@
+---
+title: "嵌入式 Linux"
+source_directory: "07_Linux_Embedded"
+knowledge_type: embedded_interview_qa
+language: zh-CN
+tags: [sysfs, GPIO, hwmon, procfs]
+---
+
+# 嵌入式 Linux
+
+本文件将题目与对应答案放在同一个二级标题下。检索命中一个知识单元后，应同时参考题目、理论和答案生成中文口述回答。
+
+## linux drivers sysfs：核心理论与上下文
+
+来源：`07_Linux_Embedded/01_linux_drivers_sysfs.c`
+
+### 面试助手回答要求
+
+先给出 30～60 秒可口述结论，再解释原理、实现步骤、边界条件和常见错误；代码题需要结合参考实现说明，不要只复述代码。
+
+### 理论、公共定义与使用说明
+
+```c
+/** ===============================================================
+ * EMBEDDED INTERVIEW PREP
+ * 主题：Linux 嵌入式 — sysfs、进程、套接字
+ * 文件：07_Linux_Embedded/01_linux_drivers_sysfs.c
+ * ===============================================================
+ *
+ * Linux 嵌入式（Yocto、Buildroot、Raspberry Pi、i.MX）
+ * 是独立于裸机的一项技能。
+ * 了解用户空间、内核接口和调试工具。
+ * =============================================================== */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <dirent.h>
+
+/* ===============================================================
+ * THEORY — Linux 嵌入式架构
+ * ===============================================================
+ *
+ * 用户空间 ↔ 内核边界：
+ *
+ * 应用程序（C/Python）
+ * ↕ 文件 I/O (打开/读/写/ioctl)
+ * 虚拟文件系统（VFS）
+ * ↕
+ * ┌──────────────────────────────────┐
+ * │ sysfs (/sys/class/gpio/...) │ ← 通过文件进行硬件控制
+ * │ devfs (/dev/ttyS0, /dev/i2c) │ ← 字符设备
+ * │ procfs (/proc/meminfo, ...) │ ← 内核运行时信息
+ * └──────────────────────────────────┘
+ * ↕ 内核驱动
+ * 硬件（GPIO、SPI、I2C、UART、...）
+ *
+ * 关键接口：
+ * /sys/class/gpio/ — 通过 sysfs 进行 GPIO 控制
+ * /sys/class/leds/ — LED 控制（亮度、触发器）
+ * /sys/class/hwmon/ — 硬件监控（温度、电压）
+ * /sys/bus/i2c/ — I2C 设备树
+ * /dev/i2c-N — I2C 用户空间访问（I2C_RDWR ioctl）
+ * /dev/spidevN.N — SPI 用户空间访问（SPI_IOC_MESSAGE ioctl）
+ * /proc/meminfo — 内存统计信息
+ * /proc/net/dev — 网络接口统计信息
+ * =============================================================== */
+
+/* ===============================================================
+```
+
+### 答案文件公共定义
+
+答案来源：`07_Linux_Embedded/answers/01_linux_drivers_sysfs_answers.c`
+
+```c
+/*
+ * ANSWERS: 07_Linux_Embedded/01_linux_drivers_sysfs.c
+ * ============================================================ */
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+
+/* ============================================================
+ * INTERVIEW QUESTION ANSWERS
+ * ============================================================
+
+Q1: sysfs vs /dev — when do you use each?
+
+A: /dev: character or block device files. Accessed with open()/read()/write()/ioctl().
+   Used for: UART (/dev/ttyS0), SPI (/dev/spidevX.Y), I2C (/dev/i2c-N),
+   GPIO (legacy /dev/gpiochip0 via ioctl), video (/dev/videoN), audio.
+   These are streaming or transactional — you exchange raw bytes/frames.
+
+   sysfs (/sys): virtual filesystem exposing kernel object attributes.
+   Each file represents a single attribute (integer, string, hex value).
+   Read/write with open()/read()/write() or echo/cat from shell.
+   Used for: GPIO direction/value (legacy sysfs-gpio, deprecated),
+   LED trigger/brightness, hwmon sensors (temperature, voltage),
+   network interface stats, power management, device attributes.
+
+   Rule: sysfs for configuration and status attributes.
+         /dev for data streams and commands.
+   Modern GPIO: use libgpiod (/dev/gpiochipN + ioctl) instead of sysfs-gpio.
+
+Q2: What does it mean that sysfs files are "virtual"?
+
+A: The files in /sys don't exist on disk. The kernel synthesizes them on
+   each read/write. When you read /sys/class/gpio/gpio17/value:
+   1. VFS calls the sysfs show() callback registered for that attribute.
+   2. The callback reads the actual GPIO register and returns "0\n" or "1\n".
+   3. The bytes never touch storage.
+   Similarly for writes: write() → store() callback → sets GPIO register.
+   Size reported by stat() is always 4096 (page size) regardless of content.
+   File position after read: advance past content → next read returns EOF.
+   Always re-open or lseek(0) to re-read current value.
+
+Q3: Why is libgpiod preferred over sysfs-gpio?
+
+A: sysfs-gpio (CONFIG_GPIO_SYSFS) problems:
+   1. Deprecated since Linux 4.8 — may be removed in future kernels.
+   2. No way to read multiple GPIO values atomically.
+   3. Polling requires inotify or slow file reads; no efficient event
+      notification for edge detection with low latency.
+   4. Race condition: export creates the sysfs files, but there's a delay
+      before udev sets permissions — script must retry or sleep.
+   5. Can't claim GPIO exclusive ownership — two processes can fight.
+
+   libgpiod (gpiod_*): ioctl-based, uses /dev/gpiochipN.
+   Advantages: atomic multi-pin read/write, proper edge detection
+   (poll()/POLLIN on gpiod_line_event_fd), exclusive line reservation,
+   actively maintained, designed for userspace GPIO.
+   API: gpiod_chip_open, gpiod_chip_get_line, gpiod_line_request_output,
+        gpiod_line_set_value, gpiod_line_release.
+
+Q4: Reading CPU temperature — which file and what is the unit?
+
+A: Path: /sys/class/thermal/thermal_zone0/temp
+   Unit: millidegrees Celsius (integer).
+   Example: reading "45234" = 45.234°C.
+   Convert: float temp_c = atoi(buf) / 1000.0f;
+
+   For hardware monitors (ADT7461, LM75, etc. connected via I2C):
+   /sys/class/hwmon/hwmon0/temp1_input (same millidegrees format).
+
+   On Raspberry Pi: thermal_zone0 is the SoC (BCM2835/BCM2711) junction temp.
+   Normally runs 40-60°C under load. Throttles at 80°C.
+
+Q5: /proc/meminfo — what does MemAvailable mean vs MemFree?
+
+A: MemFree: physical RAM pages with NOTHING in them — truly idle.
+   MemAvailable (since Linux 3.14): estimate of how much memory is actually
+   available for starting new applications WITHOUT swapping.
+   Includes: MemFree + reclaimable caches (page cache, slab reclaimable)
+   minus the portion of those that can't be freed.
+   Why the difference matters:
+   Linux uses "free" RAM as disk cache (PageCache) to speed up I/O.
+   MemFree ignores this cache; if you request memory, the kernel reclaims cache.
+   MemAvailable accounts for reclaimable cache → more accurate measure of
+   "can I start this process?" without hitting swap.
+   For embedded: use MemAvailable to judge memory pressure.
+
+Q6: LED trigger "timer" — what sysfs files to set blink rate?
+
+A: After setting trigger to "timer":
+   /sys/class/leds/<name>/delay_on  — milliseconds LED stays ON per cycle
+   /sys/class/leds/<name>/delay_off — milliseconds LED stays OFF per cycle
+   Example: 500ms on, 500ms off (1 Hz blink):
+   echo "timer" > /sys/class/leds/led0/trigger
+   echo "500"   > /sys/class/leds/led0/delay_on
+   echo "500"   > /sys/class/leds/led0/delay_off
+   The LED subsystem uses a kernel timer; no CPU busy-wait.
+   Other triggers: "heartbeat" (kernel load-proportional), "mmc0" (disk activity),
+   "netdev" (network traffic), "cpu0" (CPU activity).
+*/
+
+/* ============================================================
+ * Helper: write string to sysfs file
+ * ============================================================ */
+
+static int sysfs_write(const char *path, const char *value)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -errno;
+    int r = (int)write(fd, value, strlen(value));
+    close(fd);
+    return (r < 0) ? -errno : 0;
+}
+
+static int sysfs_read(const char *path, char *buf, size_t bufsz)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -errno;
+    ssize_t n = read(fd, buf, bufsz - 1);
+    close(fd);
+    if (n < 0) return -errno;
+    buf[n] = '\0';
+    /* Strip trailing newline */
+    if (n > 0 && buf[n-1] == '\n') buf[n-1] = '\0';
+    return 0;
+}
+
+/* ============================================================
+```
+
+---
+
+## linux drivers sysfs：任务 1
+
+来源：`07_Linux_Embedded/01_linux_drivers_sysfs.c`；任务编号：`1`
+
+### 面试助手回答要求
+
+先给出 30～60 秒可口述结论，再解释原理、实现步骤、边界条件和常见错误；代码题需要结合参考实现说明。
+
+### 题目与待实现代码
+
+```c
+* TASK 1 — 通过 sysfs 控制 GPIO
+ *
+ * 传统接口（仍在嵌入式Linux 中广泛使用）。
+ * 新项目使用 libgpiod / /dev/gpiochipN 代替。
+ * =============================================================== */
+
+#define SYSFS_GPIO_PATH  "/sys/class/gpio"
+
+int sysfs_gpio_export(uint32_t pin)
+{
+    /* TODO：打开“/sys/class/gpio/export”进行写入
+     * 将引脚号写为字符串（例如，“17\n”）
+     * 关闭并返回 0，错误时返回 -1 */
+    char path[64];
+    snprintf(path, sizeof(path), "%s/export", SYSFS_GPIO_PATH);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;   /* 需要 root 或 GPIO 组 */
+    char buf[8];
+    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)pin);
+    int ret = (write(fd, buf, (size_t)n) == n) ? 0 : -1;
+    close(fd);
+    return ret;
+}
+
+int sysfs_gpio_set_direction(uint32_t pin, const char *direction)
+{
+    /* TODO：打开“/sys/class/gpio/gpioN/direction”进行写入
+     * 写“入”或“出”
+     * 成功返回0，错误返回-1 */
+    char path[64];
+    snprintf(path, sizeof(path), "%s/gpio%u/direction", SYSFS_GPIO_PATH, (unsigned)pin);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    ssize_t written = write(fd, direction, strlen(direction));
+    close(fd);
+    return (written == (ssize_t)strlen(direction)) ? 0 : -1;
+}
+
+int sysfs_gpio_write(uint32_t pin, uint8_t value)
+{
+    /* TODO：打开“/sys/class/gpio/gpioN/value”进行写入
+     * 写“1”或“0” */
+    char path[64];
+    snprintf(path, sizeof(path), "%s/gpio%u/value", SYSFS_GPIO_PATH, (unsigned)pin);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    char c = value ? '1' : '0';
+    int ret = (write(fd, &c, 1) == 1) ? 0 : -1;
+    close(fd);
+    return ret;
+}
+
+int sysfs_gpio_read(uint32_t pin)
+{
+    /* TODO：打开读取，读取1个字符，返回0或1 */
+    char path[64];
+    snprintf(path, sizeof(path), "%s/gpio%u/value", SYSFS_GPIO_PATH, (unsigned)pin);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    char c = '0';
+    ssize_t r = read(fd, &c, 1);
+    close(fd);
+    return (r == 1) ? (c == '1' ? 1 : 0) : -1;
+}
+
+int sysfs_gpio_unexport(uint32_t pin)
+{
+    /* TODO：将引脚号写入/sys/class/gpio/unexport */
+    char path[64], buf[8];
+    snprintf(path, sizeof(path), "%s/unexport", SYSFS_GPIO_PATH);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)pin);
+    int ret = (write(fd, buf, (size_t)n) == n) ? 0 : -1;
+    close(fd);
+    return ret;
+}
+
+/* ===============================================================
+```
+
+### 对应参考答案
+
+```c
+* TASK 1 — GPIO sysfs operations
+ * ============================================================ */
+
+int sysfs_gpio_export(unsigned int gpio_num)
+{
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u", gpio_num);
+    return sysfs_write("/sys/class/gpio/export", buf);
+}
+
+int sysfs_gpio_unexport(unsigned int gpio_num)
+{
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u", gpio_num);
+    return sysfs_write("/sys/class/gpio/unexport", buf);
+}
+
+int sysfs_gpio_set_direction(unsigned int gpio_num, const char *direction)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%u/direction", gpio_num);
+    return sysfs_write(path, direction);
+}
+
+int sysfs_gpio_write(unsigned int gpio_num, uint8_t value)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%u/value", gpio_num);
+    return sysfs_write(path, value ? "1" : "0");
+}
+
+int sysfs_gpio_read(unsigned int gpio_num, uint8_t *value)
+{
+    char path[64], buf[4];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%u/value", gpio_num);
+    int r = sysfs_read(path, buf, sizeof(buf));
+    if (r < 0) return r;
+    *value = (uint8_t)atoi(buf);
+    return 0;
+}
+
+/* ============================================================
+```
+
+---
+
+## linux drivers sysfs：任务 2
+
+来源：`07_Linux_Embedded/01_linux_drivers_sysfs.c`；任务编号：`2`
+
+### 面试助手回答要求
+
+先给出 30～60 秒可口述结论，再解释原理、实现步骤、边界条件和常见错误；代码题需要结合参考实现说明。
+
+### 题目与待实现代码
+
+```c
+* TASK 2 — 通过 hwmon sysfs 读取 CPU 温度
+ * =============================================================== */
+
+float read_cpu_temp_celsius(void)
+{
+    /* 首先尝试 Thermal_zone0（在 SBC 上最常见） */
+    const char *paths[] = {
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/class/hwmon/hwmon0/temp1_input",
+        NULL
+    };
+
+    for (int i = 0; paths[i]; i++) {
+        int fd = open(paths[i], O_RDONLY);
+        if (fd < 0) continue;
+        char buf[16] = {0};
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (r > 0) {
+            long millideg = strtol(buf, NULL, 10);
+            return (float)millideg / 1000.0f;
+        }
+    }
+    return -1.0f;   /* 未找到*/
+}
+
+/*===============================================================
+```
+
+### 对应参考答案
+
+```c
+* TASK 2 — CPU temperature
+ * ============================================================ */
+
+int read_cpu_temp_celsius(float *temp_out)
+{
+    char buf[16];
+    int r = sysfs_read("/sys/class/thermal/thermal_zone0/temp", buf, sizeof(buf));
+    if (r < 0) {
+        /* Try hwmon fallback */
+        r = sysfs_read("/sys/class/hwmon/hwmon0/temp1_input", buf, sizeof(buf));
+        if (r < 0) return r;
+    }
+    *temp_out = (float)atoi(buf) / 1000.0f;  /* millidegrees → Celsius */
+    return 0;
+}
+
+/* ============================================================
+```
+
+---
+
+## linux drivers sysfs：任务 3
+
+来源：`07_Linux_Embedded/01_linux_drivers_sysfs.c`；任务编号：`3`
+
+### 面试助手回答要求
+
+先给出 30～60 秒可口述结论，再解释原理、实现步骤、边界条件和常见错误；代码题需要结合参考实现说明。
+
+### 题目与待实现代码
+
+```c
+* TASK 3 — 解析 /proc/meminfo
+ * =============================================================== */
+
+typedef struct {
+    uint64_t total_kb;
+    uint64_t free_kb;
+    uint64_t available_kb;
+    uint64_t buffers_kb;
+    uint64_t cached_kb;
+} MemInfo;
+
+int parse_meminfo(MemInfo *info)
+{
+    /* TODO：打开/proc/meminfo
+     * 逐行读取，解析“Key:value kB”格式。
+     * 填写总计、空闲、可用、缓冲区、缓存。
+     * 成功返回0，错误返回-1。 */
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    memset(info, 0, sizeof(*info));
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        uint64_t val = 0;
+        if      (sscanf(line, "MemTotal:     %llu kB", (unsigned long long*)&val) == 1) info->total_kb     = val;
+        else if (sscanf(line, "MemFree:      %llu kB", (unsigned long long*)&val) == 1) info->free_kb      = val;
+        else if (sscanf(line, "MemAvailable: %llu kB", (unsigned long long*)&val) == 1) info->available_kb = val;
+        else if (sscanf(line, "Buffers:      %llu kB", (unsigned long long*)&val) == 1) info->buffers_kb   = val;
+        else if (sscanf(line, "Cached:       %llu kB", (unsigned long long*)&val) == 1) info->cached_kb    = val;
+    }
+    fclose(f);
+    return 0;
+}
+
+/* ===============================================================
+```
+
+### 对应参考答案
+
+```c
+* TASK 3 — /proc/meminfo parser
+ * ============================================================ */
+
+typedef struct {
+    uint64_t mem_total_kb;
+    uint64_t mem_free_kb;
+    uint64_t mem_available_kb;
+    uint64_t buffers_kb;
+    uint64_t cached_kb;
+} MemInfo;
+
+int parse_meminfo(MemInfo *out)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -errno;
+
+    char line[128];
+    memset(out, 0, sizeof(*out));
+
+    while (fgets(line, sizeof(line), f)) {
+        uint64_t val;
+        if (sscanf(line, "MemTotal: %llu kB", (unsigned long long *)&val) == 1)
+            out->mem_total_kb = val;
+        else if (sscanf(line, "MemFree: %llu kB", (unsigned long long *)&val) == 1)
+            out->mem_free_kb = val;
+        else if (sscanf(line, "MemAvailable: %llu kB", (unsigned long long *)&val) == 1)
+            out->mem_available_kb = val;
+        else if (sscanf(line, "Buffers: %llu kB", (unsigned long long *)&val) == 1)
+            out->buffers_kb = val;
+        else if (sscanf(line, "Cached: %llu kB", (unsigned long long *)&val) == 1)
+            out->cached_kb = val;
+    }
+    fclose(f);
+    return 0;
+}
+
+/* ============================================================
+```
+
+---
+
+## linux drivers sysfs：任务 4
+
+来源：`07_Linux_Embedded/01_linux_drivers_sysfs.c`；任务编号：`4`
+
+### 面试助手回答要求
+
+先给出 30～60 秒可口述结论，再解释原理、实现步骤、边界条件和常见错误；代码题需要结合参考实现说明。
+
+### 题目与待实现代码
+
+```c
+* TASK 4 — LED 触发控制（心跳、定时器等）
+ *
+ * /sys/class/leds/<name>/trigger — 设置触发类型
+ * /sys/class/leds/<name>/brightness — 设置 0 或 max_brightness
+ * 定时器触发：
+ * /sys/class/leds/<name>/delay_on — 毫秒
+ * /sys/class/leds/<name>/delay_off — 毫秒关闭
+ * =============================================================== */
+
+int led_set_trigger(const char *led_name, const char *trigger)
+{
+    /* TODO：将触发器写入/sys/class/leds/led_name/trigger */
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/trigger", led_name);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    ssize_t r = write(fd, trigger, strlen(trigger));
+    close(fd);
+    return (r == (ssize_t)strlen(trigger)) ? 0 : -1;
+}
+
+int led_set_brightness(const char *led_name, uint32_t brightness)
+{
+    char path[128], buf[16];
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/brightness", led_name);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)brightness);
+    ssize_t r = write(fd, buf, (size_t)n);
+    close(fd);
+    return (r == n) ? 0 : -1;
+}
+
+int led_blink_timer(const char *led_name, uint32_t on_ms, uint32_t off_ms)
+{
+    /* TODO：1.设置触发为“定时器”
+     * 2.将on_ms写入delay_on
+     * 3.将off_ms写入delay_off */
+    if (led_set_trigger(led_name, "timer") < 0) return -1;
+
+    char path[128], buf[16];
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/delay_on", led_name);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)on_ms);
+    write(fd, buf, (size_t)n);
+    close(fd);
+
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/delay_off", led_name);
+    fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    n = snprintf(buf, sizeof(buf), "%u", (unsigned)off_ms);
+    write(fd, buf, (size_t)n);
+    close(fd);
+    return 0;
+}
+
+/* ===============================================================
+```
+
+### 对应参考答案
+
+```c
+* TASK 4 — LED sysfs control
+ * ============================================================ */
+
+int led_set_trigger(const char *led_name, const char *trigger)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/trigger", led_name);
+    return sysfs_write(path, trigger);
+}
+
+int led_set_brightness(const char *led_name, uint8_t brightness)
+{
+    char path[96], buf[8];
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/brightness", led_name);
+    snprintf(buf, sizeof(buf), "%u", brightness);
+    return sysfs_write(path, buf);
+}
+
+int led_blink_timer(const char *led_name, uint32_t delay_on_ms, uint32_t delay_off_ms)
+{
+    int r;
+    char buf[16];
+
+    r = led_set_trigger(led_name, "timer");
+    if (r < 0) return r;
+
+    char path[96];
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/delay_on", led_name);
+    snprintf(buf, sizeof(buf), "%u", delay_on_ms);
+    r = sysfs_write(path, buf);
+    if (r < 0) return r;
+
+    snprintf(path, sizeof(path), "/sys/class/leds/%s/delay_off", led_name);
+    snprintf(buf, sizeof(buf), "%u", delay_off_ms);
+    return sysfs_write(path, buf);
+}
+
+/* ============================================================
+```
+
+---
+
+## linux drivers sysfs：任务 5
+
+来源：`07_Linux_Embedded/01_linux_drivers_sysfs.c`；任务编号：`5`
+
+### 面试助手回答要求
+
+先给出 30～60 秒可口述结论，再解释原理、实现步骤、边界条件和常见错误；代码题需要结合参考实现说明。
+
+### 题目与待实现代码
+
+```c
+* TASK 5 — 读取网络接口统计信息
+ * =============================================================== */
+
+typedef struct {
+    uint64_t rx_bytes;
+    uint64_t rx_packets;
+    uint64_t rx_errors;
+    uint64_t tx_bytes;
+    uint64_t tx_packets;
+    uint64_t tx_errors;
+} NetIfStats;
+
+int read_netif_stats(const char *ifname, NetIfStats *stats)
+{
+    /* /sys/class/net/<ifname>/statistics/rx_bytes 等 */
+    struct { const char *file; uint64_t *field; } fields[] = {
+        {"rx_bytes",   &stats->rx_bytes},
+        {"rx_packets", &stats->rx_packets},
+        {"rx_errors",  &stats->rx_errors},
+        {"tx_bytes",   &stats->tx_bytes},
+        {"tx_packets", &stats->tx_packets},
+        {"tx_errors",  &stats->tx_errors},
+        {NULL, NULL}
+    };
+    memset(stats, 0, sizeof(*stats));
+    for (int i = 0; fields[i].file; i++) {
+        char path[128], buf[32] = {0};
+        snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/%s", ifname, fields[i].file);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        read(fd, buf, sizeof(buf)-1);
+        close(fd);
+        *fields[i].field = (uint64_t)strtoull(buf, NULL, 10);
+    }
+    return 0;
+}
+
+/* ===============================================================
+```
+
+### 对应参考答案
+
+```c
+* TASK 5 — Network interface stats
+ * ============================================================ */
+
+typedef struct { uint64_t rx_bytes, tx_bytes, rx_packets, tx_packets; } NetStats;
+
+int read_netif_stats(const char *ifname, NetStats *out)
+{
+    char path[96], buf[32];
+    int  r;
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", ifname);
+    r = sysfs_read(path, buf, sizeof(buf));
+    if (r < 0) return r;
+    out->rx_bytes = (uint64_t)strtoull(buf, NULL, 10);
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/tx_bytes", ifname);
+    r = sysfs_read(path, buf, sizeof(buf));
+    if (r < 0) return r;
+    out->tx_bytes = (uint64_t)strtoull(buf, NULL, 10);
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_packets", ifname);
+    r = sysfs_read(path, buf, sizeof(buf));
+    if (r < 0) return r;
+    out->rx_packets = (uint64_t)strtoull(buf, NULL, 10);
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/tx_packets", ifname);
+    r = sysfs_read(path, buf, sizeof(buf));
+    if (r < 0) return r;
+    out->tx_packets = (uint64_t)strtoull(buf, NULL, 10);
+
+    return 0;
+}
+
+/* ============================================================
+```
+
+---
+
+## linux drivers sysfs：任务 6
+
+来源：`07_Linux_Embedded/01_linux_drivers_sysfs.c`；任务编号：`6`
+
+### 面试助手回答要求
+
+先给出 30～60 秒可口述结论，再解释原理、实现步骤、边界条件和常见错误；代码题需要结合参考实现说明。
+
+### 题目与待实现代码
+
+```c
+* TASK 6 — BUG HUNT：sysfs GPIO 使用错误
+ *
+ * 下面的函数导出 GPIO 并使其闪烁。
+ * 它有 3 个错误。
+ * =============================================================== */
+
+void gpio_blink_BUGGY(uint32_t pin)
+{
+    char path[64], buf[8];
+
+    /* Bug 1：导出路径错误 */
+    snprintf(path, sizeof(path), "/sys/class/gpio/%u/export", pin);  /* 应该是/sys/class/gpio/export */
+    int fd = open(path, O_WRONLY);
+    if (fd >= 0) {
+        snprintf(buf, sizeof(buf), "%u", (unsigned)pin);
+        write(fd, buf, strlen(buf));
+        close(fd);
+    }
+
+    /* Bug 2：导出后没有睡眠/延迟 - 方向文件可能尚不存在
+     * 导出后内核需要时间创建 sysfs 条目 */
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%u/direction", pin);
+    fd = open(path, O_WRONLY);
+    if (fd >= 0) {
+        write(fd, "out", 3);
+        close(fd);
+    }
+
+    /* Bug 3：值文件在下次写入之前未关闭 - fd 在循环中泄漏 */
+    for (int i = 0; i < 3; i++) {
+        snprintf(path, sizeof(path), "/sys/class/gpio/gpio%u/value", pin);
+        fd = open(path, O_WRONLY);
+        write(fd, "1", 1);
+        /* 缺少：关闭（fd）； */
+        usleep(500000);
+        /* fd = 打开（路径，O_WRONLY）； — 但上面的 fd 从未关闭过！ */
+        write(fd, "0", 1);
+        close(fd);
+        usleep(500000);
+    }
+}
+
+/* ===============================================================
+ * MAIN — 如果在 Linux 上运行则打印系统信息
+ * ===============================================================*/
+
+int main(void)
+{
+    printf("Linux Embedded sysfs demo\n");
+
+    float temp = read_cpu_temp_celsius();
+    if (temp > 0)
+        printf("CPU temperature: %.1f °C\n", (double)temp);
+    else
+        printf("Temperature not available (run on Linux target)\n");
+
+    MemInfo mem = {0};
+    if (parse_meminfo(&mem) == 0) {
+        printf("Memory: total=%llu kB, available=%llu kB\n",
+               (unsigned long long)mem.total_kb,
+               (unsigned long long)mem.available_kb);
+    }
+
+    printf("sysfs demo complete.\n");
+    return 0;
+}
+
+/*===============================================================
+ * INTERVIEW QUESTIONS
+ * ===============================================================
+ *
+ * Q1: /sys/class/gpio (sysfs) 之间有什么区别
+ * 和 /dev/gpiochipN (libgpiod)？现在首选哪个？
+ * 答案：TODO
+ *
+ * Q2：您写入 /sys/class/gpio/export 并得到 EBUSY。
+ * 这是什么意思以及如何解决它？
+ * 答案：TODO
+ *
+ * Q3：如何从用户空间读取硬件传感器？
+ * 命名内核接口和典型文件路径。
+ * 答案：TODO
+ *
+ * Q4：什么是内核模块？如何装载/卸载？
+ * 你什么时候会编写内核驱动程序而不是用户空间驱动程序？
+ * 答案：TODO
+ *
+ * Q5：解释字符设备（/dev/ttyS0）的区别
+ * 和 sysfs 属性 (/sys/...)。各自什么时候使用？
+ * 答案：TODO*/
+```
+
+### 对应参考答案
+
+```c
+* TASK 6 — Bug hunt FIXED (gpio_blink_BUGGY)
+ *
+ * Bug 1: export path wrong — "/sys/gpio/export" does not exist.
+ *        Correct path: "/sys/class/gpio/export"
+ *        FIX: use correct sysfs path.
+ *
+ * Bug 2: no delay after export before setting direction.
+ *        After writing to /sys/class/gpio/export, udev creates the gpio
+ *        directory and sets permissions asynchronously. A race condition:
+ *        if direction file is opened too soon, open() returns EACCES or ENOENT.
+ *        FIX: use a retry loop or usleep(100000) after export.
+ *        Better: poll() for the file to appear.
+ *
+ * Bug 3: fd opened in the loop but never closed on each iteration.
+ *        LED fd is opened each iteration without being closed → fd leak.
+ *        After ~1024 iterations: EMFILE (too many open files) → write fails.
+ *        FIX: close(fd) after each write, or open once before the loop
+ *        and lseek(fd, 0, SEEK_SET) before each write.
+ * ============================================================ */
+
+int main(void)
+{
+    /* Unit tests run on the host, which won't have /sys/class/gpio,
+       so we just verify the function signatures compile and the
+       sysfs_write/sysfs_read helpers work with a known file. */
+
+    printf("Linux sysfs answer file compiled successfully.\n");
+    printf("Run on target (Linux + GPIO hardware) to test sysfs functions.\n");
+
+    /* Verify sysfs_read handles missing files gracefully */
+    char buf[16];
+    int r = sysfs_read("/nonexistent/path", buf, sizeof(buf));
+    printf("sysfs_read missing file returned %d (expected negative)\n", r);
+
+    return 0;
+}
+```
