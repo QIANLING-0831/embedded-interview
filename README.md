@@ -1,4 +1,22 @@
-# 嵌入式软件工程师面试准备（中文版）
+<p align="center"><img src=".github/readme/banner.svg" alt="Embedded Interview — 嵌入式面试准备 · 中文版" width="100%"></p>
+
+<h1 align="center">Embedded Interview · 嵌入式面试准备 · 中文版</h1>
+
+<p align="center">从 C 语言基础到 RTOS 与系统设计，将练习、参考答案和知识包放在一起。</p>
+
+<p align="center"><img src="https://img.shields.io/badge/docs-%E4%B8%AD%E6%96%87-2dd4bf?style=flat-square&amp;labelColor=172033" alt="docs: 中文"> <img src="https://img.shields.io/badge/maintainer-QIANLING-0831-2dd4bf?style=flat-square&amp;labelColor=172033" alt="maintainer: QIANLING-0831"> </p>
+
+<p align="center"><a href="#qwen--rag-markdown-知识包">Qwen / RAG Markdown 知识包</a> &nbsp; · &nbsp; <a href="#内容目录">内容目录</a> &nbsp; · &nbsp; <a href="#推荐学习顺序">推荐学习顺序</a> &nbsp; · &nbsp; <a href="#使用方法">使用方法</a></p>
+
+---
+
+## 项目概览
+
+| 方向 | 内容 |
+| --- | --- |
+| **基础训练** | C、内存、中断与裸机外设 |
+| **工程主题** | RTOS、通信协议、Linux 与 IoT |
+| **知识复用** | 按题答配对的中文 Markdown 知识包 |
 
 本仓库翻译自 [Amir7698/embedded-interview-prep](https://github.com/Amir7698/embedded-interview-prep)，覆盖嵌入式 C、内存、中断、裸机外设、FreeRTOS、通信协议、嵌入式 Linux、IoT、系统设计与综合面试题。
 
