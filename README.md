@@ -4,7 +4,7 @@
 
 <p align="center">从 C 语言基础到 RTOS 与系统设计，将练习、参考答案和知识包放在一起。</p>
 
-<p align="center"><img src="https://img.shields.io/badge/docs-%E4%B8%AD%E6%96%87-2dd4bf?style=flat-square&amp;labelColor=172033" alt="docs: 中文"> <img src="https://img.shields.io/badge/maintainer-QIANLING-0831-2dd4bf?style=flat-square&amp;labelColor=172033" alt="maintainer: QIANLING-0831"> </p>
+<p align="center"><img src="https://img.shields.io/badge/docs-%E4%B8%AD%E6%96%87-2dd4bf?style=flat-square&amp;labelColor=172033" alt="docs: 中文"> <img src="https://img.shields.io/badge/maintainer-QIANLING--0831-2dd4bf?style=flat-square&amp;labelColor=172033" alt="maintainer: QIANLING-0831"> </p>
 
 <p align="center"><a href="#qwen--rag-markdown-知识包">Qwen / RAG Markdown 知识包</a> &nbsp; · &nbsp; <a href="#内容目录">内容目录</a> &nbsp; · &nbsp; <a href="#推荐学习顺序">推荐学习顺序</a> &nbsp; · &nbsp; <a href="#使用方法">使用方法</a></p>
 
